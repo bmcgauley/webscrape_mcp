@@ -1,0 +1,1046 @@
+#!/usr/bin/env python3
+"""
+Web Scraping MCP Server
+
+A comprehensive web scraping server following MCP best practices.
+Provides tools for scraping, crawling, and extracting content from websites
+without requiring external API keys.
+"""
+
+from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field, field_validator, ConfigDict, HttpUrl
+from typing import Optional, List, Dict, Any, Literal
+from enum import Enum
+import asyncio
+import httpx
+from bs4 import BeautifulSoup
+import html2text
+from urllib.parse import urljoin, urlparse, urlunparse
+from collections import deque
+import json
+import re
+import base64
+from datetime import datetime
+
+# Initialize MCP server
+mcp = FastMCP("webscrape_mcp")
+
+# Constants
+CHARACTER_LIMIT = 25000
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+DEFAULT_TIMEOUT = 30.0
+
+# Response format enum
+class ResponseFormat(str, Enum):
+    """Output format for scraped content."""
+    MARKDOWN = "markdown"
+    HTML = "html"
+    TEXT = "text"
+    JSON = "json"
+
+
+# ============================================================================
+# Input Models
+# ============================================================================
+
+class ScrapeUrlInput(BaseModel):
+    """Input for scraping a single URL."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    url: str = Field(
+        ...,
+        description="URL to scrape (e.g., 'https://example.com', 'https://docs.python.org/3/')",
+        min_length=1
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default), 'html', 'text', or 'json' for structured data"
+    )
+    include_links: bool = Field(
+        default=False,
+        description="Include all links found on the page"
+    )
+    include_images: bool = Field(
+        default=False,
+        description="Include image URLs found on the page"
+    )
+    include_metadata: bool = Field(
+        default=True,
+        description="Include page metadata (title, description, etc.)"
+    )
+    
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL format."""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError("URL must start with http:// or https://")
+        return v
+
+
+class ScrapeMultipleUrlsInput(BaseModel):
+    """Input for batch scraping multiple URLs."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    urls: List[str] = Field(
+        ...,
+        description="List of URLs to scrape",
+        min_items=1,
+        max_items=20
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format for all URLs"
+    )
+    include_metadata: bool = Field(
+        default=True,
+        description="Include page metadata"
+    )
+    
+    @field_validator('urls')
+    @classmethod
+    def validate_urls(cls, v: List[str]) -> List[str]:
+        """Validate all URLs."""
+        for url in v:
+            if not url.startswith(('http://', 'https://')):
+                raise ValueError(f"URL must start with http:// or https://: {url}")
+        return v
+
+
+class CrawlSiteInput(BaseModel):
+    """Input for crawling a website."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    url: str = Field(
+        ...,
+        description="Starting URL to crawl from",
+        min_length=1
+    )
+    max_depth: int = Field(
+        default=2,
+        description="Maximum crawl depth (0 = only start URL, 1 = start + direct links, etc.)",
+        ge=0,
+        le=5
+    )
+    max_pages: int = Field(
+        default=20,
+        description="Maximum number of pages to crawl",
+        ge=1,
+        le=100
+    )
+    same_domain_only: bool = Field(
+        default=True,
+        description="Only crawl URLs from the same domain"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format for crawled pages"
+    )
+    
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL format."""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError("URL must start with http:// or https://")
+        return v
+
+
+class ExtractLinksInput(BaseModel):
+    """Input for extracting links from a URL."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    url: str = Field(
+        ...,
+        description="URL to extract links from",
+        min_length=1
+    )
+    same_domain_only: bool = Field(
+        default=False,
+        description="Only return links from the same domain"
+    )
+    include_anchors: bool = Field(
+        default=False,
+        description="Include anchor/fragment links (e.g., #section)"
+    )
+    
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL format."""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError("URL must start with http:// or https://")
+        return v
+
+
+class ScrapeWithJsInput(BaseModel):
+    """Input for scraping JavaScript-rendered pages."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    url: str = Field(
+        ...,
+        description="URL to scrape with JavaScript rendering",
+        min_length=1
+    )
+    wait_for_selector: Optional[str] = Field(
+        default=None,
+        description="CSS selector to wait for before scraping (e.g., '.main-content', '#data-loaded')"
+    )
+    wait_seconds: int = Field(
+        default=2,
+        description="Seconds to wait for page to load",
+        ge=0,
+        le=30
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format"
+    )
+    
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL format."""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError("URL must start with http:// or https://")
+        return v
+
+
+class ScreenshotUrlInput(BaseModel):
+    """Input for capturing page screenshots."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    url: str = Field(
+        ...,
+        description="URL to screenshot",
+        min_length=1
+    )
+    full_page: bool = Field(
+        default=True,
+        description="Capture full page (True) or visible viewport only (False)"
+    )
+    width: int = Field(
+        default=1920,
+        description="Browser viewport width in pixels",
+        ge=320,
+        le=3840
+    )
+    height: int = Field(
+        default=1080,
+        description="Browser viewport height in pixels",
+        ge=240,
+        le=2160
+    )
+    
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL format."""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError("URL must start with http:// or https://")
+        return v
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+async def _fetch_url(url: str, timeout: float = DEFAULT_TIMEOUT) -> tuple[str, int, dict]:
+    """
+    Fetch URL content with proper error handling.
+    
+    Returns:
+        tuple: (content, status_code, headers)
+    """
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=timeout,
+        headers={"User-Agent": DEFAULT_USER_AGENT}
+    ) as client:
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.text, response.status_code, dict(response.headers)
+        except httpx.HTTPStatusError as e:
+            raise Exception(f"HTTP {e.response.status_code}: {url}")
+        except httpx.TimeoutException:
+            raise Exception(f"Request timeout for: {url}")
+        except Exception as e:
+            raise Exception(f"Failed to fetch {url}: {str(e)}")
+
+
+def _extract_metadata(soup: BeautifulSoup, url: str) -> dict:
+    """Extract page metadata from HTML."""
+    metadata = {
+        "url": url,
+        "title": None,
+        "description": None,
+        "keywords": None,
+        "author": None,
+        "og_data": {}
+    }
+    
+    # Title
+    if soup.title:
+        metadata["title"] = soup.title.string.strip() if soup.title.string else None
+    
+    # Meta tags
+    for meta in soup.find_all('meta'):
+        name = meta.get('name', '').lower()
+        property_name = meta.get('property', '').lower()
+        content = meta.get('content', '')
+        
+        if name == 'description':
+            metadata["description"] = content
+        elif name == 'keywords':
+            metadata["keywords"] = content
+        elif name == 'author':
+            metadata["author"] = content
+        elif property_name.startswith('og:'):
+            metadata["og_data"][property_name] = content
+    
+    return metadata
+
+
+def _extract_links(soup: BeautifulSoup, base_url: str, same_domain_only: bool = False, include_anchors: bool = False) -> List[str]:
+    """Extract all links from HTML."""
+    links = set()
+    base_domain = urlparse(base_url).netloc
+    
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag['href']
+        
+        # Skip empty hrefs
+        if not href or href == '#':
+            continue
+        
+        # Convert relative URLs to absolute
+        absolute_url = urljoin(base_url, href)
+        
+        # Parse URL
+        parsed = urlparse(absolute_url)
+        
+        # Skip non-http(s) protocols
+        if parsed.scheme not in ('http', 'https'):
+            continue
+        
+        # Filter by domain if requested
+        if same_domain_only and parsed.netloc != base_domain:
+            continue
+        
+        # Remove anchor if requested
+        if not include_anchors:
+            absolute_url = urlunparse(parsed._replace(fragment=''))
+        
+        links.add(absolute_url)
+    
+    return sorted(links)
+
+
+def _extract_images(soup: BeautifulSoup, base_url: str) -> List[str]:
+    """Extract all image URLs from HTML."""
+    images = set()
+    
+    for img_tag in soup.find_all('img', src=True):
+        src = img_tag['src']
+        absolute_url = urljoin(base_url, src)
+        
+        # Only include http(s) images
+        if urlparse(absolute_url).scheme in ('http', 'https'):
+            images.add(absolute_url)
+    
+    return sorted(images)
+
+
+def _html_to_markdown(html: str, base_url: str = "") -> str:
+    """Convert HTML to clean markdown."""
+    h = html2text.HTML2Text()
+    h.ignore_links = False
+    h.ignore_images = False
+    h.ignore_emphasis = False
+    h.body_width = 0  # Don't wrap lines
+    h.baseurl = base_url
+    return h.handle(html)
+
+
+def _html_to_text(soup: BeautifulSoup) -> str:
+    """Extract clean text from HTML."""
+    # Remove script and style elements
+    for script in soup(["script", "style", "nav", "footer", "header"]):
+        script.decompose()
+    
+    # Get text
+    text = soup.get_text()
+    
+    # Break into lines and remove leading/trailing space
+    lines = (line.strip() for line in text.splitlines())
+    # Break multi-headlines into a line each
+    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+    # Drop blank lines
+    text = '\n'.join(chunk for chunk in chunks if chunk)
+    
+    return text
+
+
+def _truncate_response(content: str, format_type: str = "text") -> tuple[str, bool]:
+    """
+    Truncate response if it exceeds character limit.
+    
+    Returns:
+        tuple: (content, was_truncated)
+    """
+    if len(content) <= CHARACTER_LIMIT:
+        return content, False
+    
+    truncated = content[:CHARACTER_LIMIT]
+    if format_type == "markdown":
+        truncated += "\n\n... [Content truncated due to size]"
+    elif format_type == "json":
+        try:
+            # Try to parse and reserialize
+            data = json.loads(content)
+            truncated = json.dumps(data, indent=2)[:CHARACTER_LIMIT]
+            truncated += "\n... [Content truncated due to size]"
+        except:
+            truncated += "\n... [Content truncated due to size]"
+    else:
+        truncated += "\n... [Content truncated due to size]"
+    
+    return truncated, True
+
+
+# ============================================================================
+# Tool Implementations
+# ============================================================================
+
+@mcp.tool(
+    name="webscrape_scrape_url",
+    annotations={
+        "title": "Scrape URL",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def scrape_url(params: ScrapeUrlInput) -> str:
+    """
+    Scrape content from a single URL and return it in the specified format.
+    
+    This tool fetches a web page and extracts its content. It supports multiple
+    output formats and can optionally include links, images, and metadata.
+    
+    Best for:
+    - Extracting article content
+    - Getting page information
+    - Converting web pages to markdown
+    - Scraping static websites
+    
+    Args:
+        params (ScrapeUrlInput): Configuration for scraping containing:
+            - url: The web page URL to scrape
+            - response_format: Output format (markdown, html, text, or json)
+            - include_links: Whether to extract all links
+            - include_images: Whether to extract image URLs
+            - include_metadata: Whether to include page metadata
+    
+    Returns:
+        str: Scraped content in the requested format, or error message if scraping fails
+    """
+    try:
+        # Fetch the page
+        html_content, status_code, headers = await _fetch_url(params.url)
+        
+        # Parse HTML
+        soup = BeautifulSoup(html_content, 'lxml')
+        
+        # Extract metadata if requested
+        metadata = None
+        if params.include_metadata:
+            metadata = _extract_metadata(soup, params.url)
+        
+        # Extract links if requested
+        links = None
+        if params.include_links:
+            links = _extract_links(soup, params.url)
+        
+        # Extract images if requested
+        images = None
+        if params.include_images:
+            images = _extract_images(soup, params.url)
+        
+        # Format response based on requested format
+        if params.response_format == ResponseFormat.JSON:
+            result = {
+                "url": params.url,
+                "status_code": status_code,
+                "scraped_at": datetime.utcnow().isoformat() + "Z"
+            }
+            
+            if metadata:
+                result["metadata"] = metadata
+            
+            # Get text content
+            result["content"] = _html_to_text(soup)
+            
+            if links:
+                result["links"] = links
+                result["link_count"] = len(links)
+            
+            if images:
+                result["images"] = images
+                result["image_count"] = len(images)
+            
+            content = json.dumps(result, indent=2)
+            
+        elif params.response_format == ResponseFormat.MARKDOWN:
+            # Convert to markdown
+            markdown_content = _html_to_markdown(html_content, params.url)
+            
+            result_parts = []
+            
+            if metadata:
+                result_parts.append(f"# {metadata.get('title', 'Untitled Page')}\n")
+                if metadata.get('description'):
+                    result_parts.append(f"**Description:** {metadata['description']}\n")
+                result_parts.append(f"**URL:** {params.url}\n")
+                result_parts.append("---\n")
+            
+            result_parts.append(markdown_content)
+            
+            if links:
+                result_parts.append(f"\n\n## Found Links ({len(links)})\n")
+                for link in links[:50]:  # Limit to first 50
+                    result_parts.append(f"- {link}\n")
+                if len(links) > 50:
+                    result_parts.append(f"... and {len(links) - 50} more links\n")
+            
+            if images:
+                result_parts.append(f"\n\n## Found Images ({len(images)})\n")
+                for img in images[:20]:  # Limit to first 20
+                    result_parts.append(f"- {img}\n")
+                if len(images) > 20:
+                    result_parts.append(f"... and {len(images) - 20} more images\n")
+            
+            content = "".join(result_parts)
+            
+        elif params.response_format == ResponseFormat.TEXT:
+            content = _html_to_text(soup)
+            
+        else:  # HTML
+            content = html_content
+        
+        # Truncate if necessary
+        content, was_truncated = _truncate_response(content, params.response_format.value)
+        
+        if was_truncated:
+            content += "\n\n⚠️ Response truncated due to size limit. Use response_format='json' or scrape specific sections for full content."
+        
+        return content
+        
+    except Exception as e:
+        return f"Error scraping {params.url}: {str(e)}"
+
+
+@mcp.tool(
+    name="webscrape_scrape_multiple_urls",
+    annotations={
+        "title": "Scrape Multiple URLs",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def scrape_multiple_urls(params: ScrapeMultipleUrlsInput) -> str:
+    """
+    Scrape content from multiple URLs concurrently.
+    
+    This tool efficiently scrapes multiple web pages at once, making it ideal
+    for batch operations. Maximum 20 URLs per request.
+    
+    Best for:
+    - Scraping multiple pages from a sitemap
+    - Batch processing article URLs
+    - Comparing content across pages
+    
+    Args:
+        params (ScrapeMultipleUrlsInput): Configuration containing:
+            - urls: List of URLs to scrape (1-20 URLs)
+            - response_format: Output format for all pages
+            - include_metadata: Whether to include page metadata
+    
+    Returns:
+        str: JSON array of scrape results, or error details for failed URLs
+    """
+    try:
+        # Create scrape tasks for all URLs
+        tasks = []
+        for url in params.urls:
+            scrape_params = ScrapeUrlInput(
+                url=url,
+                response_format=params.response_format,
+                include_links=False,
+                include_images=False,
+                include_metadata=params.include_metadata
+            )
+            tasks.append(scrape_url(scrape_params))
+        
+        # Execute all scrapes concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Format results
+        output = {
+            "total_urls": len(params.urls),
+            "scraped_at": datetime.utcnow().isoformat() + "Z",
+            "results": []
+        }
+        
+        for url, result in zip(params.urls, results):
+            if isinstance(result, Exception):
+                output["results"].append({
+                    "url": url,
+                    "success": False,
+                    "error": str(result)
+                })
+            else:
+                output["results"].append({
+                    "url": url,
+                    "success": True,
+                    "content": result
+                })
+        
+        content = json.dumps(output, indent=2)
+        
+        # Truncate if necessary
+        content, was_truncated = _truncate_response(content, "json")
+        
+        if was_truncated:
+            content += "\n\n⚠️ Response truncated. Consider scraping fewer URLs or use pagination."
+        
+        return content
+        
+    except Exception as e:
+        return f"Error in batch scraping: {str(e)}"
+
+
+@mcp.tool(
+    name="webscrape_crawl_site",
+    annotations={
+        "title": "Crawl Website",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def crawl_site(params: CrawlSiteInput) -> str:
+    """
+    Recursively crawl a website starting from a given URL.
+    
+    This tool discovers and scrapes pages by following links, respecting
+    depth and page limits. Perfect for exploring website structure or
+    scraping multiple related pages.
+    
+    Best for:
+    - Discovering all pages in a section
+    - Scraping documentation sites
+    - Building sitemaps
+    - Content auditing
+    
+    Args:
+        params (CrawlSiteInput): Configuration containing:
+            - url: Starting URL to crawl from
+            - max_depth: How many link levels to follow (0-5)
+            - max_pages: Maximum pages to crawl (1-100)
+            - same_domain_only: Only crawl URLs from the same domain
+            - response_format: Output format for crawled pages
+    
+    Returns:
+        str: JSON object with crawl results including all discovered pages and their content
+    """
+    try:
+        base_domain = urlparse(params.url).netloc
+        visited = set()
+        to_visit = deque([(params.url, 0)])  # (url, depth)
+        results = []
+        
+        while to_visit and len(visited) < params.max_pages:
+            current_url, depth = to_visit.popleft()
+            
+            # Skip if already visited or depth exceeded
+            if current_url in visited or depth > params.max_depth:
+                continue
+            
+            visited.add(current_url)
+            
+            try:
+                # Scrape the current page
+                html_content, status_code, _ = await _fetch_url(current_url)
+                soup = BeautifulSoup(html_content, 'lxml')
+                
+                # Extract metadata
+                metadata = _extract_metadata(soup, current_url)
+                
+                # Get content
+                if params.response_format == ResponseFormat.MARKDOWN:
+                    content = _html_to_markdown(html_content, current_url)
+                else:
+                    content = _html_to_text(soup)
+                
+                # Store result
+                results.append({
+                    "url": current_url,
+                    "depth": depth,
+                    "title": metadata.get("title"),
+                    "status_code": status_code,
+                    "content": content[:5000] if len(content) > 5000 else content  # Limit individual page content
+                })
+                
+                # Find links to crawl next (only if not at max depth)
+                if depth < params.max_depth:
+                    links = _extract_links(soup, current_url, params.same_domain_only)
+                    
+                    for link in links:
+                        if link not in visited:
+                            to_visit.append((link, depth + 1))
+                
+            except Exception as e:
+                results.append({
+                    "url": current_url,
+                    "depth": depth,
+                    "error": str(e)
+                })
+        
+        output = {
+            "start_url": params.url,
+            "pages_crawled": len(visited),
+            "max_depth": params.max_depth,
+            "max_pages": params.max_pages,
+            "crawled_at": datetime.utcnow().isoformat() + "Z",
+            "results": results
+        }
+        
+        content = json.dumps(output, indent=2)
+        
+        # Truncate if necessary
+        content, was_truncated = _truncate_response(content, "json")
+        
+        if was_truncated:
+            content += f"\n\n⚠️ Response truncated. Crawled {len(visited)} pages but showing partial results. Reduce max_depth or max_pages for full content."
+        
+        return content
+        
+    except Exception as e:
+        return f"Error crawling {params.url}: {str(e)}"
+
+
+@mcp.tool(
+    name="webscrape_extract_links",
+    annotations={
+        "title": "Extract Links",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def extract_links(params: ExtractLinksInput) -> str:
+    """
+    Extract all links from a web page.
+    
+    This tool quickly discovers all hyperlinks on a page, making it ideal
+    for building sitemaps or finding related pages.
+    
+    Best for:
+    - Site mapping
+    - Finding all subpages
+    - Link analysis
+    - Navigation discovery
+    
+    Args:
+        params (ExtractLinksInput): Configuration containing:
+            - url: URL to extract links from
+            - same_domain_only: Only return links from the same domain
+            - include_anchors: Include fragment/anchor links (#section)
+    
+    Returns:
+        str: JSON object with all discovered links and metadata
+    """
+    try:
+        # Fetch the page
+        html_content, status_code, _ = await _fetch_url(params.url)
+        
+        # Parse HTML
+        soup = BeautifulSoup(html_content, 'lxml')
+        
+        # Extract links
+        links = _extract_links(
+            soup,
+            params.url,
+            params.same_domain_only,
+            params.include_anchors
+        )
+        
+        # Categorize links
+        internal_links = []
+        external_links = []
+        base_domain = urlparse(params.url).netloc
+        
+        for link in links:
+            link_domain = urlparse(link).netloc
+            if link_domain == base_domain:
+                internal_links.append(link)
+            else:
+                external_links.append(link)
+        
+        output = {
+            "url": params.url,
+            "total_links": len(links),
+            "internal_links_count": len(internal_links),
+            "external_links_count": len(external_links),
+            "extracted_at": datetime.utcnow().isoformat() + "Z",
+            "internal_links": internal_links,
+            "external_links": external_links if not params.same_domain_only else []
+        }
+        
+        content = json.dumps(output, indent=2)
+        
+        # Truncate if necessary
+        content, was_truncated = _truncate_response(content, "json")
+        
+        if was_truncated:
+            content += "\n\n⚠️ Response truncated. Too many links found. Use same_domain_only=true to reduce results."
+        
+        return content
+        
+    except Exception as e:
+        return f"Error extracting links from {params.url}: {str(e)}"
+
+
+@mcp.tool(
+    name="webscrape_scrape_with_js",
+    annotations={
+        "title": "Scrape with JavaScript Rendering",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def scrape_with_js(params: ScrapeWithJsInput) -> str:
+    """
+    Scrape JavaScript-rendered pages using a headless browser.
+    
+    This tool uses Playwright to render JavaScript and capture dynamic content
+    that isn't available in the raw HTML. Essential for modern SPAs and
+    dynamically loaded content.
+    
+    Best for:
+    - Single Page Applications (React, Vue, Angular)
+    - Pages with lazy-loaded content
+    - JavaScript-heavy websites
+    - Dynamic dashboards
+    
+    Note: Requires Playwright to be installed. Install with:
+      pip install playwright && playwright install chromium
+    
+    Args:
+        params (ScrapeWithJsInput): Configuration containing:
+            - url: URL to scrape with JS rendering
+            - wait_for_selector: CSS selector to wait for (optional)
+            - wait_seconds: Additional seconds to wait for page load
+            - response_format: Output format
+    
+    Returns:
+        str: Rendered page content after JavaScript execution
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return "Error: Playwright not installed. Install with: pip install playwright && playwright install chromium"
+    
+    try:
+        async with async_playwright() as p:
+            # Launch browser
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            
+            try:
+                # Navigate to URL
+                await page.goto(params.url, wait_until="networkidle", timeout=DEFAULT_TIMEOUT * 1000)
+                
+                # Wait for specific selector if provided
+                if params.wait_for_selector:
+                    await page.wait_for_selector(params.wait_for_selector, timeout=15000)
+                
+                # Additional wait time
+                if params.wait_seconds > 0:
+                    await asyncio.sleep(params.wait_seconds)
+                
+                # Get rendered HTML
+                html_content = await page.content()
+                
+                # Parse with BeautifulSoup
+                soup = BeautifulSoup(html_content, 'lxml')
+                
+                # Extract metadata
+                metadata = _extract_metadata(soup, params.url)
+                
+                # Format response
+                if params.response_format == ResponseFormat.JSON:
+                    result = {
+                        "url": params.url,
+                        "title": metadata.get("title"),
+                        "scraped_at": datetime.utcnow().isoformat() + "Z",
+                        "content": _html_to_text(soup)
+                    }
+                    content = json.dumps(result, indent=2)
+                    
+                elif params.response_format == ResponseFormat.MARKDOWN:
+                    markdown = _html_to_markdown(html_content, params.url)
+                    content = f"# {metadata.get('title', 'Untitled Page')}\n\n{markdown}"
+                    
+                elif params.response_format == ResponseFormat.TEXT:
+                    content = _html_to_text(soup)
+                    
+                else:  # HTML
+                    content = html_content
+                
+                # Truncate if necessary
+                content, was_truncated = _truncate_response(content, params.response_format.value)
+                
+                if was_truncated:
+                    content += "\n\n⚠️ Response truncated due to size limit."
+                
+                return content
+                
+            finally:
+                await browser.close()
+                
+    except Exception as e:
+        return f"Error scraping {params.url} with JavaScript: {str(e)}"
+
+
+@mcp.tool(
+    name="webscrape_screenshot_url",
+    annotations={
+        "title": "Screenshot URL",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def screenshot_url(params: ScreenshotUrlInput) -> str:
+    """
+    Capture a screenshot of a web page.
+    
+    This tool renders a page and captures it as an image, useful for
+    visual documentation, testing, or archival purposes.
+    
+    Best for:
+    - Visual documentation
+    - Page appearance verification
+    - Archiving page layouts
+    - Creating thumbnails
+    
+    Note: Requires Playwright to be installed. Install with:
+      pip install playwright && playwright install chromium
+    
+    Args:
+        params (ScreenshotUrlInput): Configuration containing:
+            - url: URL to screenshot
+            - full_page: Capture entire page or just viewport
+            - width: Browser viewport width (320-3840px)
+            - height: Browser viewport height (240-2160px)
+    
+    Returns:
+        str: Base64-encoded PNG image data with metadata
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return "Error: Playwright not installed. Install with: pip install playwright && playwright install chromium"
+    
+    try:
+        async with async_playwright() as p:
+            # Launch browser
+            browser = await p.chromium.launch(headless=True)
+            
+            # Create page with specified viewport
+            page = await browser.new_page(
+                viewport={"width": params.width, "height": params.height}
+            )
+            
+            try:
+                # Navigate to URL
+                await page.goto(params.url, wait_until="networkidle", timeout=DEFAULT_TIMEOUT * 1000)
+                
+                # Take screenshot
+                screenshot_bytes = await page.screenshot(
+                    full_page=params.full_page,
+                    type="png"
+                )
+                
+                # Encode to base64
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+                
+                # Get page title
+                title = await page.title()
+                
+                result = {
+                    "url": params.url,
+                    "title": title,
+                    "viewport": {
+                        "width": params.width,
+                        "height": params.height
+                    },
+                    "full_page": params.full_page,
+                    "screenshot_size_bytes": len(screenshot_bytes),
+                    "captured_at": datetime.utcnow().isoformat() + "Z",
+                    "image_data": f"data:image/png;base64,{screenshot_b64}"
+                }
+                
+                content = json.dumps(result, indent=2)
+                
+                return content
+                
+            finally:
+                await browser.close()
+                
+    except Exception as e:
+        return f"Error capturing screenshot of {params.url}: {str(e)}"
+
+
+# ============================================================================
+# Server Entry Point
+# ============================================================================
+
+if __name__ == "__main__":
+    # Run the server
+    mcp.run()
