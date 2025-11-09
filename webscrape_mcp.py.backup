@@ -64,9 +64,7 @@ from collections import deque
 import json
 import re
 import base64
-from datetime import datetime, timedelta
-import hashlib
-import time
+from datetime import datetime
 
 # Initialize MCP server
 mcp = FastMCP("webscrape_mcp")
@@ -75,13 +73,6 @@ mcp = FastMCP("webscrape_mcp")
 CHARACTER_LIMIT = 25000
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 DEFAULT_TIMEOUT = 30.0
-
-# Cache constants for progressive disclosure
-CACHE_TTL_SECONDS = 3600  # 1 hour TTL for cached scrapes
-PREVIEW_LENGTH = 500  # Character limit for content previews
-
-# Global cache for scrape results (resource-based pattern)
-SCRAPE_CACHE: Dict[str, Dict[str, Any]] = {}
 
 # Response format enum
 class ResponseFormat(str, Enum):
@@ -486,422 +477,9 @@ def _truncate_response(content: str, format_type: str = "text") -> tuple[str, bo
     return truncated, True
 
 
-
-
-# ============================================================================
-# Cache Management Functions (Progressive Disclosure Pattern)
-# ============================================================================
-
-def _generate_scrape_id(url: str, format_or_suffix: str) -> str:
-    """
-    Generate a unique ID for a scrape operation.
-
-    Args:
-        url: The URL being scraped
-        format_or_suffix: Format type or additional suffix for uniqueness
-
-    Returns:
-        MD5 hash string as scrape ID
-    """
-    unique_string = f"{url}_{format_or_suffix}_{int(time.time())}"
-    return hashlib.md5(unique_string.encode()).hexdigest()
-
-
-def _clean_expired_cache():
-    """Remove expired entries from the scrape cache."""
-    current_time = datetime.utcnow()
-    expired_ids = []
-
-    for scrape_id, entry in SCRAPE_CACHE.items():
-        if current_time > entry.get("expires_at", current_time):
-            expired_ids.append(scrape_id)
-
-    for scrape_id in expired_ids:
-        del SCRAPE_CACHE[scrape_id]
-
-
-def _store_in_cache(
-    scrape_id: str,
-    url: str,
-    content: str,
-    metadata: Optional[Dict[str, Any]] = None,
-    links: Optional[List[str]] = None,
-    images: Optional[List[str]] = None
-):
-    """
-    Store scrape results in cache for resource-based access.
-
-    Args:
-        scrape_id: Unique identifier for this scrape
-        url: Original URL
-        content: Full scraped content
-        metadata: Optional page metadata
-        links: Optional list of links
-        images: Optional list of images
-    """
-    # Clean expired entries first
-    _clean_expired_cache()
-
-    # Store the scrape result
-    SCRAPE_CACHE[scrape_id] = {
-        "url": url,
-        "content": content,
-        "metadata": metadata or {},
-        "links": links or [],
-        "images": images or [],
-        "created_at": datetime.utcnow(),
-        "expires_at": datetime.utcnow() + timedelta(seconds=CACHE_TTL_SECONDS)
-    }
-
-
-
-
-# ============================================================================
-# Cache Management Functions (Progressive Disclosure Pattern)
-# ============================================================================
-
-def _generate_scrape_id(url: str, format_or_suffix: str) -> str:
-    """
-    Generate a unique ID for a scrape operation.
-
-    Args:
-        url: The URL being scraped
-        format_or_suffix: Format type or additional suffix for uniqueness
-
-    Returns:
-        MD5 hash string as scrape ID
-    """
-    unique_string = f"{url}_{format_or_suffix}_{int(time.time())}"
-    return hashlib.md5(unique_string.encode()).hexdigest()
-
-
-def _clean_expired_cache():
-    """Remove expired entries from the scrape cache."""
-    current_time = datetime.utcnow()
-    expired_ids = []
-
-    for scrape_id, entry in SCRAPE_CACHE.items():
-        if current_time > entry.get("expires_at", current_time):
-            expired_ids.append(scrape_id)
-
-    for scrape_id in expired_ids:
-        del SCRAPE_CACHE[scrape_id]
-
-
-def _store_in_cache(
-    scrape_id: str,
-    url: str,
-    content: str,
-    metadata: Optional[Dict[str, Any]] = None,
-    links: Optional[List[str]] = None,
-    images: Optional[List[str]] = None
-):
-    """
-    Store scrape results in cache for resource-based access.
-
-    Args:
-        scrape_id: Unique identifier for this scrape
-        url: Original URL
-        content: Full scraped content
-        metadata: Optional page metadata
-        links: Optional list of links
-        images: Optional list of images
-    """
-    # Clean expired entries first
-    _clean_expired_cache()
-
-    # Store the scrape result
-    SCRAPE_CACHE[scrape_id] = {
-        "url": url,
-        "content": content,
-        "metadata": metadata or {},
-        "links": links or [],
-        "images": images or [],
-        "created_at": datetime.utcnow(),
-        "expires_at": datetime.utcnow() + timedelta(seconds=CACHE_TTL_SECONDS)
-    }
-
-
 # ============================================================================
 # Tool Implementations
 # ============================================================================
-
-
-
-# ============================================================================
-# Discovery Tools (Progressive Disclosure)
-# ============================================================================
-
-# ============================================================================
-# Resource Access Endpoints (Progressive Disclosure)
-# ============================================================================
-
-# ============================================================================
-# Discovery Tools (Progressive Disclosure)
-# ============================================================================
-
-@mcp.tool(
-    name="webscrape_list_tools",
-    annotations={
-        "title": "List WebScrape Tools",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True
-    }
-)
-async def list_tools(
-    detail_level: Literal["minimal", "brief", "full"] = "minimal",
-    category: Optional[str] = None
-) -> str:
-    """
-    List available web scraping tools with configurable detail level.
-
-    Enables progressive disclosure - agents can discover tools without loading
-    all schemas into context upfront.
-
-    Args:
-        detail_level: Amount of detail to return
-            - "minimal": Just tool names (smallest token usage)
-            - "brief": Names and descriptions
-            - "full": Complete schemas with all parameters
-        category: Optional filter by category ("scraping", "extraction", "rendering")
-
-    Returns:
-        JSON string with tool information based on detail level
-    """
-    tools = {
-        "webscrape_scrape_url": {
-            "name": "webscrape_scrape_url",
-            "description": "Scrape content from a single URL",
-            "category": "scraping",
-            "best_for": ["Extracting article content", "Getting page information", "Converting web pages to markdown"]
-        },
-        "webscrape_scrape_multiple_urls": {
-            "name": "webscrape_scrape_multiple_urls",
-            "description": "Scrape multiple URLs concurrently (batch operation)",
-            "category": "scraping",
-            "best_for": ["Scraping multiple pages from a sitemap", "Batch processing article URLs", "Comparing content across pages"]
-        },
-        "webscrape_crawl_site": {
-            "name": "webscrape_crawl_site",
-            "description": "Recursively crawl a website following links",
-            "category": "scraping",
-            "best_for": ["Discovering all pages in a section", "Scraping documentation sites", "Building sitemaps"]
-        },
-        "webscrape_extract_links": {
-            "name": "webscrape_extract_links",
-            "description": "Extract all links from a web page",
-            "category": "extraction",
-            "best_for": ["Site mapping", "Finding all subpages", "Link analysis"]
-        },
-        "webscrape_scrape_with_js": {
-            "name": "webscrape_scrape_with_js",
-            "description": "Scrape JavaScript-rendered pages using headless browser",
-            "category": "rendering",
-            "best_for": ["Single Page Applications", "Pages with lazy-loaded content", "JavaScript-heavy websites"]
-        },
-        "webscrape_screenshot_url": {
-            "name": "webscrape_screenshot_url",
-            "description": "Capture a screenshot of a web page",
-            "category": "rendering",
-            "best_for": ["Visual documentation", "Page appearance verification", "Creating thumbnails"]
-        }
-    }
-
-    # Filter by category if requested
-    if category:
-        tools = {k: v for k, v in tools.items() if v.get("category") == category}
-
-    # Return based on detail level
-    if detail_level == "minimal":
-        return json.dumps(list(tools.keys()), indent=2)
-    elif detail_level == "brief":
-        brief_tools = [
-            {
-                "name": v["name"],
-                "description": v["description"],
-                "category": v["category"]
-            }
-            for v in tools.values()
-        ]
-        return json.dumps(brief_tools, indent=2)
-    else:  # full
-        return json.dumps(tools, indent=2)
-
-
-@mcp.tool(
-    name="webscrape_search_tools",
-    annotations={
-        "title": "Search WebScrape Tools",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True
-    }
-)
-async def search_tools(
-    query: str,
-    category: Optional[str] = None
-) -> str:
-    """
-    Search for web scraping tools by keyword or category.
-
-    Args:
-        query: Search term (e.g., "javascript", "crawl", "links", "batch")
-        category: Optional category filter ("scraping", "extraction", "rendering")
-
-    Returns:
-        JSON array of matching tools with their descriptions
-    """
-    tools = {
-        "webscrape_scrape_url": {
-            "name": "webscrape_scrape_url",
-            "description": "Scrape content from a single URL",
-            "category": "scraping",
-            "keywords": ["scrape", "url", "single", "page", "content", "markdown", "html"]
-        },
-        "webscrape_scrape_multiple_urls": {
-            "name": "webscrape_scrape_multiple_urls",
-            "description": "Scrape multiple URLs concurrently (batch operation)",
-            "category": "scraping",
-            "keywords": ["scrape", "multiple", "batch", "concurrent", "urls", "bulk"]
-        },
-        "webscrape_crawl_site": {
-            "name": "webscrape_crawl_site",
-            "description": "Recursively crawl a website following links",
-            "category": "scraping",
-            "keywords": ["crawl", "recursive", "follow", "links", "site", "depth", "sitemap"]
-        },
-        "webscrape_extract_links": {
-            "name": "webscrape_extract_links",
-            "description": "Extract all links from a web page",
-            "category": "extraction",
-            "keywords": ["extract", "links", "urls", "hrefs", "navigation", "mapping"]
-        },
-        "webscrape_scrape_with_js": {
-            "name": "webscrape_scrape_with_js",
-            "description": "Scrape JavaScript-rendered pages using headless browser",
-            "category": "rendering",
-            "keywords": ["javascript", "js", "render", "spa", "react", "vue", "angular", "dynamic", "playwright"]
-        },
-        "webscrape_screenshot_url": {
-            "name": "webscrape_screenshot_url",
-            "description": "Capture a screenshot of a web page",
-            "category": "rendering",
-            "keywords": ["screenshot", "capture", "image", "visual", "png", "thumbnail"]
-        }
-    }
-
-    query_lower = query.lower()
-    matching_tools = []
-
-    for tool_id, tool_info in tools.items():
-        # Check if query matches name, description, or keywords
-        if (query_lower in tool_info["name"].lower() or
-            query_lower in tool_info["description"].lower() or
-            any(query_lower in keyword for keyword in tool_info.get("keywords", []))):
-
-            # Apply category filter if specified
-            if category is None or tool_info.get("category") == category:
-                matching_tools.append({
-                    "name": tool_info["name"],
-                    "description": tool_info["description"],
-                    "category": tool_info["category"]
-                })
-
-    return json.dumps(matching_tools, indent=2)
-
-
-# ============================================================================
-# Resource Access Endpoints (Progressive Disclosure)
-# ============================================================================
-
-@mcp.resource("scrape://{scrape_id}/content")
-async def get_scrape_content(scrape_id: str) -> str:
-    """
-    Retrieve full scraped content by ID.
-
-    This resource endpoint enables the progressive disclosure pattern - tools return
-    resource URIs instead of full content, then agents can fetch the content only
-    when needed.
-
-    Args:
-        scrape_id: Unique identifier from a scrape operation
-
-    Returns:
-        Full scraped content
-
-    Raises:
-        Exception: If scrape ID not found or expired
-    """
-    # Clean expired cache entries
-    _clean_expired_cache()
-
-    if scrape_id not in SCRAPE_CACHE:
-        raise Exception(
-            f"Scrape ID '{scrape_id}' not found in cache. "
-            f"It may have expired (TTL: {CACHE_TTL_SECONDS}s) or never existed. "
-            f"Please perform the scrape operation again."
-        )
-
-    entry = SCRAPE_CACHE[scrape_id]
-
-    # Check if expired
-    if datetime.utcnow() > entry["expires_at"]:
-        del SCRAPE_CACHE[scrape_id]
-        raise Exception(
-            f"Scrape ID '{scrape_id}' has expired. "
-            f"Cache TTL is {CACHE_TTL_SECONDS} seconds. "
-            f"Please scrape the URL again."
-        )
-
-    return entry["content"]
-
-
-@mcp.resource("scrape://{scrape_id}/metadata")
-async def get_scrape_metadata(scrape_id: str) -> str:
-    """
-    Retrieve metadata for a scrape without the full content.
-
-    Useful for getting information about a scrape (URL, links, images, stats)
-    without loading the entire content payload.
-
-    Args:
-        scrape_id: Unique identifier from a scrape operation
-
-    Returns:
-        JSON string with metadata
-
-    Raises:
-        Exception: If scrape ID not found or expired
-    """
-    # Clean expired cache entries
-    _clean_expired_cache()
-
-    if scrape_id not in SCRAPE_CACHE:
-        raise Exception(f"Scrape ID '{scrape_id}' not found in cache")
-
-    entry = SCRAPE_CACHE[scrape_id]
-
-    # Check if expired
-    if datetime.utcnow() > entry["expires_at"]:
-        del SCRAPE_CACHE[scrape_id]
-        raise Exception(f"Scrape ID '{scrape_id}' has expired")
-
-    metadata_response = {
-        "scrape_id": scrape_id,
-        "url": entry["url"],
-        "metadata": entry["metadata"],
-        "links": entry["links"],
-        "images": entry["images"],
-        "link_count": len(entry["links"]),
-        "image_count": len(entry["images"]),
-        "content_length": len(entry["content"]),
-        "created_at": entry["created_at"].isoformat() + "Z",
-        "expires_at": entry["expires_at"].isoformat() + "Z"
-    }
-
-    return json.dumps(metadata_response, indent=2)
-
 
 @mcp.tool(
     name="webscrape_scrape_url",
@@ -961,98 +539,75 @@ async def scrape_url(params: ScrapeUrlInput) -> str:
         
         # Format response based on requested format
         if params.response_format == ResponseFormat.JSON:
-            full_content = json.dumps({
+            result = {
                 "url": params.url,
                 "status_code": status_code,
-                "content": _html_to_text(soup),
-                "metadata": metadata if metadata else {},
-                "links": links if links else [],
-                "images": images if images else []
-            }, indent=2)
-
+                "scraped_at": datetime.utcnow().isoformat() + "Z"
+            }
+            
+            if metadata:
+                result["metadata"] = metadata
+            
+            # Get text content
+            result["content"] = _html_to_text(soup)
+            
+            if links:
+                result["links"] = links
+                result["link_count"] = len(links)
+            
+            if images:
+                result["images"] = images
+                result["image_count"] = len(images)
+            
+            content = json.dumps(result, indent=2)
+            
         elif params.response_format == ResponseFormat.MARKDOWN:
             # Convert to markdown
             markdown_content = _html_to_markdown(html_content, params.url)
-
+            
             result_parts = []
-
+            
             if metadata:
                 result_parts.append(f"# {metadata.get('title', 'Untitled Page')}\n")
                 if metadata.get('description'):
                     result_parts.append(f"**Description:** {metadata['description']}\n")
                 result_parts.append(f"**URL:** {params.url}\n")
                 result_parts.append("---\n")
-
+            
             result_parts.append(markdown_content)
-
+            
             if links:
                 result_parts.append(f"\n\n## Found Links ({len(links)})\n")
                 for link in links[:50]:  # Limit to first 50
                     result_parts.append(f"- {link}\n")
                 if len(links) > 50:
                     result_parts.append(f"... and {len(links) - 50} more links\n")
-
+            
             if images:
                 result_parts.append(f"\n\n## Found Images ({len(images)})\n")
                 for img in images[:20]:  # Limit to first 20
                     result_parts.append(f"- {img}\n")
                 if len(images) > 20:
                     result_parts.append(f"... and {len(images) - 20} more images\n")
-
-            full_content = "".join(result_parts)
-
+            
+            content = "".join(result_parts)
+            
         elif params.response_format == ResponseFormat.TEXT:
-            full_content = _html_to_text(soup)
-
+            content = _html_to_text(soup)
+            
         else:  # HTML
-            full_content = html_content
-
-        # Generate unique scrape ID
-        scrape_id = _generate_scrape_id(params.url, params.response_format.value)
-
-        # Store in cache
-        _store_in_cache(
-            scrape_id=scrape_id,
-            url=params.url,
-            content=full_content,
-            metadata=metadata or {},
-            links=links,
-            images=images
-        )
-
-        # Create preview
-        preview = full_content[:PREVIEW_LENGTH]
-        if len(full_content) > PREVIEW_LENGTH:
-            preview += "..."
-
-        # Return resource reference (NOT full content)
-        response = {
-            "success": True,
-            "scrape_id": scrape_id,
-            "url": params.url,
-            "resource_uri": f"scrape://{scrape_id}/content",
-            "metadata_uri": f"scrape://{scrape_id}/metadata",
-            "preview": preview,
-            "content_length": len(full_content),
-            "format": params.response_format.value,
-            "status_code": status_code,
-            "scraped_at": datetime.utcnow().isoformat() + "Z",
-            "expires_at": (datetime.utcnow() + timedelta(seconds=CACHE_TTL_SECONDS)).isoformat() + "Z",
-            "stats": {
-                "total_links": len(links) if links else 0,
-                "total_images": len(images) if images else 0,
-                "has_metadata": bool(metadata)
-            }
-        }
-
-        return json.dumps(response, indent=2)
+            content = html_content
+        
+        # Truncate if necessary
+        content, was_truncated = _truncate_response(content, params.response_format.value)
+        
+        if was_truncated:
+            content += "\n\n⚠️ Response truncated due to size limit. Use response_format='json' or scrape specific sections for full content."
+        
+        return content
         
     except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": str(e),
-            "url": params.url
-        }, indent=2)
+        return f"Error scraping {params.url}: {str(e)}"
 
 
 @mcp.tool(
@@ -1117,17 +672,11 @@ async def scrape_multiple_urls(params: ScrapeMultipleUrlsInput) -> str:
                     "error": str(result)
                 })
             else:
-                # result is already a JSON string with resource URIs from scrape_url
-                try:
-                    result_data = json.loads(result)
-                    output["results"].append(result_data)
-                except:
-                    # Fallback if result isn't JSON
-                    output["results"].append({
-                        "url": url,
-                        "success": True,
-                        "content": result
-                    })
+                output["results"].append({
+                    "url": url,
+                    "success": True,
+                    "content": result
+                })
         
         content = json.dumps(output, indent=2)
         
@@ -1207,26 +756,13 @@ async def crawl_site(params: CrawlSiteInput) -> str:
                 else:
                     content = _html_to_text(soup)
                 
-                # Generate scrape ID and store in cache
-                scrape_id = _generate_scrape_id(current_url, f"crawl_depth{depth}")
-                _store_in_cache(
-                    scrape_id=scrape_id,
-                    url=current_url,
-                    content=content,
-                    metadata=metadata
-                )
-
-                # Store result with resource reference
+                # Store result
                 results.append({
                     "url": current_url,
                     "depth": depth,
-                    "scrape_id": scrape_id,
-                    "resource_uri": f"scrape://{scrape_id}/content",
-                    "metadata_uri": f"scrape://{scrape_id}/metadata",
                     "title": metadata.get("title"),
                     "status_code": status_code,
-                    "content_length": len(content),
-                    "preview": content[:200] + "..." if len(content) > 200 else content
+                    "content": content[:5000] if len(content) > 5000 else content  # Limit individual page content
                 })
                 
                 # Find links to crawl next (only if not at max depth)
@@ -1421,52 +957,31 @@ async def scrape_with_js(params: ScrapeWithJsInput) -> str:
                 
                 # Format response
                 if params.response_format == ResponseFormat.JSON:
-                    full_content = json.dumps({
+                    result = {
                         "url": params.url,
                         "title": metadata.get("title"),
+                        "scraped_at": datetime.utcnow().isoformat() + "Z",
                         "content": _html_to_text(soup)
-                    }, indent=2)
-
+                    }
+                    content = json.dumps(result, indent=2)
+                    
                 elif params.response_format == ResponseFormat.MARKDOWN:
                     markdown = _html_to_markdown(html_content, params.url)
-                    full_content = f"# {metadata.get('title', 'Untitled Page')}\n\n{markdown}"
-
+                    content = f"# {metadata.get('title', 'Untitled Page')}\n\n{markdown}"
+                    
                 elif params.response_format == ResponseFormat.TEXT:
-                    full_content = _html_to_text(soup)
-
+                    content = _html_to_text(soup)
+                    
                 else:  # HTML
-                    full_content = html_content
-
-                # Generate scrape ID and store in cache
-                scrape_id = _generate_scrape_id(params.url, f"js_{params.response_format.value}")
-                _store_in_cache(
-                    scrape_id=scrape_id,
-                    url=params.url,
-                    content=full_content,
-                    metadata=metadata
-                )
-
-                # Create preview
-                preview = full_content[:PREVIEW_LENGTH]
-                if len(full_content) > PREVIEW_LENGTH:
-                    preview += "..."
-
-                # Return resource reference
-                response = {
-                    "success": True,
-                    "scrape_id": scrape_id,
-                    "url": params.url,
-                    "resource_uri": f"scrape://{scrape_id}/content",
-                    "metadata_uri": f"scrape://{scrape_id}/metadata",
-                    "preview": preview,
-                    "content_length": len(full_content),
-                    "format": params.response_format.value,
-                    "rendering_method": "javascript",
-                    "scraped_at": datetime.utcnow().isoformat() + "Z",
-                    "expires_at": (datetime.utcnow() + timedelta(seconds=CACHE_TTL_SECONDS)).isoformat() + "Z"
-                }
-
-                return json.dumps(response, indent=2)
+                    content = html_content
+                
+                # Truncate if necessary
+                content, was_truncated = _truncate_response(content, params.response_format.value)
+                
+                if was_truncated:
+                    content += "\n\n⚠️ Response truncated due to size limit."
+                
+                return content
                 
             finally:
                 await browser.close()
@@ -1541,25 +1056,10 @@ async def screenshot_url(params: ScreenshotUrlInput) -> str:
                 
                 # Get page title
                 title = await page.title()
-
-                # Store screenshot in cache
-                scrape_id = _generate_scrape_id(params.url, "screenshot")
-                screenshot_data = f"data:image/png;base64,{screenshot_b64}"
-
-                _store_in_cache(
-                    scrape_id=scrape_id,
-                    url=params.url,
-                    content=screenshot_data,
-                    metadata={"title": title, "type": "screenshot"}
-                )
-
-                # Return resource reference (not full image data)
+                
                 result = {
-                    "success": True,
-                    "scrape_id": scrape_id,
                     "url": params.url,
                     "title": title,
-                    "resource_uri": f"scrape://{scrape_id}/content",
                     "viewport": {
                         "width": params.width,
                         "height": params.height
@@ -1567,12 +1067,11 @@ async def screenshot_url(params: ScreenshotUrlInput) -> str:
                     "full_page": params.full_page,
                     "screenshot_size_bytes": len(screenshot_bytes),
                     "captured_at": datetime.utcnow().isoformat() + "Z",
-                    "expires_at": (datetime.utcnow() + timedelta(seconds=CACHE_TTL_SECONDS)).isoformat() + "Z",
-                    "note": "Use resource_uri to retrieve full image data"
+                    "image_data": f"data:image/png;base64,{screenshot_b64}"
                 }
-
+                
                 content = json.dumps(result, indent=2)
-
+                
                 return content
                 
             finally:

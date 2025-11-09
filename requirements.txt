@@ -1,0 +1,19 @@
+# WebScrape MCP - Python Dependencies
+
+# Core MCP framework
+mcp>=1.0.0
+
+# Web scraping
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+requests>=2.31.0
+
+# For headless browser support (optional)
+# playwright>=1.40.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
